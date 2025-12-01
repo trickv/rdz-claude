@@ -1,0 +1,287 @@
+name: Simulator Screenshots
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: '0 0 * * 1'  # Weekly on Mondays (optional)
+
+jobs:
+  android-simulator:
+    name: Android Emulator Screenshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install Cordova
+      run: npm install -g cordova
+
+    - name: Build Android App
+      working-directory: ./rdzwx-go
+      run: |
+        npm install
+        npm install jetifier && npx jetifier
+        cordova platform add android
+        cordova plugin add ../rdzwx-plugin/
+        cordova build android --debug
+
+    - name: Enable KVM (for faster emulator)
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
+    - name: AVD cache
+      uses: actions/cache@v4
+      id: avd-cache
+      with:
+        path: |
+          ~/.android/avd/*
+          ~/.android/adb*
+        key: avd-34
+
+    - name: Create AVD and generate snapshot for caching
+      if: steps.avd-cache.outputs.cache-hit != 'true'
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: 34
+        target: google_apis
+        arch: x86_64
+        force-avd-creation: false
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        disable-animations: false
+        script: echo "Generated AVD snapshot for caching."
+
+    - name: Run app in emulator and capture screenshot
+      uses: reactivecircus/android-emulator-runner@v2
+      with:
+        api-level: 34
+        target: google_apis
+        arch: x86_64
+        force-avd-creation: false
+        emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        disable-animations: true
+        script: |
+          echo "Installing APK..."
+          adb install ./rdzwx-go/platforms/android/app/build/outputs/apk/debug/app-debug.apk
+
+          echo "Launching app..."
+          adb shell am start -n com.rdzwx.app/.MainActivity
+
+          echo "Waiting for app to launch..."
+          sleep 10
+
+          echo "Taking initial screenshot..."
+          adb shell screencap -p /sdcard/screenshot-1-initial.png
+          adb pull /sdcard/screenshot-1-initial.png ./
+
+          echo "Dumping UI hierarchy for reference..."
+          adb shell uiautomator dump /sdcard/ui-hierarchy.xml
+          adb pull /sdcard/ui-hierarchy.xml ./
+
+          # Get screen dimensions for reference
+          adb shell wm size
+
+          echo "Attempting UI interactions..."
+
+          # Example: Tap in the center of the screen
+          sleep 2
+          adb shell input tap 540 960
+          sleep 3
+          adb shell screencap -p /sdcard/screenshot-2-after-center-tap.png
+          adb pull /sdcard/screenshot-2-after-center-tap.png ./
+
+          # Example: Tap near top-right (common menu location)
+          sleep 2
+          adb shell input tap 1000 200
+          sleep 3
+          adb shell screencap -p /sdcard/screenshot-3-after-menu-tap.png
+          adb pull /sdcard/screenshot-3-after-menu-tap.png ./
+
+          # Example: Swipe gesture (left to right)
+          sleep 2
+          adb shell input swipe 200 960 800 960 300
+          sleep 3
+          adb shell screencap -p /sdcard/screenshot-4-after-swipe.png
+          adb pull /sdcard/screenshot-4-after-swipe.png ./
+
+          # Press back button
+          sleep 2
+          adb shell input keyevent KEYCODE_BACK
+          sleep 3
+          adb shell screencap -p /sdcard/screenshot-5-after-back.png
+          adb pull /sdcard/screenshot-5-after-back.png ./
+
+          echo "All screenshots captured!"
+          ls -lh screenshot-*.png
+
+    - name: Upload Android Screenshots
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: android-screenshots
+        path: |
+          screenshot-*.png
+          ui-hierarchy.xml
+        retention-days: 30
+
+  ios-simulator:
+    name: iOS Simulator Screenshot
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install Cordova and ios-deploy
+      run: |
+        npm install -g cordova
+        npm install -g ios-deploy
+
+    - name: Install CocoaPods
+      run: sudo gem install cocoapods
+
+    - name: Build iOS App
+      working-directory: ./rdzwx-go
+      run: |
+        npm install
+        cordova platform add ios
+        cordova plugin add ../rdzwx-plugin/
+        cordova prepare ios
+        cordova build ios --emulator
+
+    - name: List available simulators
+      run: xcrun simctl list devices available
+
+    - name: Boot iPhone simulator
+      run: |
+        # Get the latest iPhone simulator UDID
+        SIMULATOR_UDID=$(xcrun simctl list devices available | grep "iPhone 15" | head -n 1 | grep -o "[0-9A-F]\{8\}-[0-9A-F]\{4\}-[0-9A-F]\{4\}-[0-9A-F]\{4\}-[0-9A-F]\{12\}")
+
+        if [ -z "$SIMULATOR_UDID" ]; then
+          echo "iPhone 15 not found, trying iPhone 14..."
+          SIMULATOR_UDID=$(xcrun simctl list devices available | grep "iPhone 14" | head -n 1 | grep -o "[0-9A-F]\{8\}-[0-9A-F]\{4\}-[0-9A-F]\{4\}-[0-9A-F]\{4\}-[0-9A-F]\{12\}")
+        fi
+
+        if [ -z "$SIMULATOR_UDID" ]; then
+          echo "No suitable iPhone simulator found!"
+          exit 1
+        fi
+
+        echo "Using simulator: $SIMULATOR_UDID"
+        echo "SIMULATOR_UDID=$SIMULATOR_UDID" >> $GITHUB_ENV
+
+        echo "Booting simulator..."
+        xcrun simctl boot "$SIMULATOR_UDID" || echo "Simulator may already be booted"
+
+        # Wait for simulator to be ready
+        echo "Waiting for simulator to be ready..."
+        sleep 10
+
+    - name: Install and launch app
+      run: |
+        # Find the .app bundle
+        APP_PATH=$(find ./rdzwx-go/platforms/ios/build/emulator -name "*.app" | head -n 1)
+
+        if [ -z "$APP_PATH" ]; then
+          echo "Could not find .app bundle!"
+          ls -la ./rdzwx-go/platforms/ios/build/
+          exit 1
+        fi
+
+        echo "Found app at: $APP_PATH"
+
+        # Install the app
+        echo "Installing app to simulator..."
+        xcrun simctl install "$SIMULATOR_UDID" "$APP_PATH"
+
+        # Get the bundle ID
+        BUNDLE_ID=$(defaults read "$APP_PATH/Info.plist" CFBundleIdentifier)
+        echo "Bundle ID: $BUNDLE_ID"
+        echo "BUNDLE_ID=$BUNDLE_ID" >> $GITHUB_ENV
+
+        # Launch the app
+        echo "Launching app..."
+        xcrun simctl launch "$SIMULATOR_UDID" "$BUNDLE_ID"
+
+        # Wait for app to launch
+        echo "Waiting for app to launch..."
+        sleep 10
+
+    - name: Interact with app and take screenshots
+      run: |
+        echo "Taking initial screenshot..."
+        xcrun simctl io "$SIMULATOR_UDID" screenshot ./screenshot-1-initial.png
+
+        echo "Attempting UI interactions..."
+
+        # Tap in the center of the screen (rough coordinates for iPhone)
+        sleep 2
+        xcrun simctl io "$SIMULATOR_UDID" tap 195 400
+        sleep 3
+        xcrun simctl io "$SIMULATOR_UDID" screenshot ./screenshot-2-after-center-tap.png
+
+        # Tap near top-right (common menu location)
+        sleep 2
+        xcrun simctl io "$SIMULATOR_UDID" tap 350 100
+        sleep 3
+        xcrun simctl io "$SIMULATOR_UDID" screenshot ./screenshot-3-after-menu-tap.png
+
+        # Swipe gesture (left to right)
+        sleep 2
+        xcrun simctl io "$SIMULATOR_UDID" swipe 50 400 350 400
+        sleep 3
+        xcrun simctl io "$SIMULATOR_UDID" screenshot ./screenshot-4-after-swipe.png
+
+        # Press home button to return to home screen
+        sleep 2
+        xcrun simctl io "$SIMULATOR_UDID" home
+        sleep 2
+        xcrun simctl io "$SIMULATOR_UDID" screenshot ./screenshot-5-home-screen.png
+
+        # Relaunch app
+        sleep 2
+        xcrun simctl launch "$SIMULATOR_UDID" "$BUNDLE_ID"
+        sleep 3
+        xcrun simctl io "$SIMULATOR_UDID" screenshot ./screenshot-6-relaunched.png
+
+        echo "All screenshots captured!"
+        ls -lh screenshot-*.png
+
+    - name: Shutdown simulator
+      if: always()
+      run: xcrun simctl shutdown "$SIMULATOR_UDID" || true
+
+    - name: Upload iOS Screenshots
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ios-screenshots
+        path: screenshot-*.png
+        retention-days: 30

@@ -1,0 +1,167 @@
+name: iOS Build & Test
+
+on:
+  push:
+    branches: [ main, master, develop, 'claude/**' ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  ios-build:
+    name: Build iOS App
+    runs-on: macos-14  # macOS with Xcode 15
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Show Xcode version
+      run: |
+        xcodebuild -version
+        xcrun --show-sdk-path
+        echo "Available Xcode apps:"
+        ls /Applications/ | grep Xcode || true
+
+    - name: Install Cordova CLI
+      run: npm install -g cordova@latest
+
+    - name: Install ios-deploy
+      run: npm install -g ios-deploy
+
+    - name: Install CocoaPods
+      run: |
+        sudo gem install cocoapods
+        pod --version
+
+    - name: Check submodules
+      run: |
+        echo "=== Verifying submodules ==="
+        ls -la rdzwx-go/ || echo "rdzwx-go not found!"
+        ls -la rdzwx-plugin/ || echo "rdzwx-plugin not found!"
+
+    - name: Install dependencies
+      working-directory: ./rdzwx-go
+      run: |
+        echo "=== Installing npm dependencies ==="
+        npm install || { echo "npm install failed"; exit 1; }
+
+    - name: Add iOS platform
+      working-directory: ./rdzwx-go
+      run: |
+        echo "=== Adding iOS platform ==="
+        cordova platform add ios --verbose || { echo "Platform add failed but continuing..."; true; }
+        cordova platform ls
+
+    - name: Add custom plugin
+      working-directory: ./rdzwx-go
+      run: |
+        echo "=== Adding custom plugin ==="
+        cordova plugin add ../rdzwx-plugin/ --verbose || {
+          echo "First attempt failed, trying to remove and re-add...";
+          cordova plugin remove com.rdzwx.plugin 2>/dev/null || true;
+          cordova plugin add ../rdzwx-plugin/ --verbose;
+        }
+        cordova plugin ls
+
+    - name: Prepare iOS platform (with CocoaPods)
+      working-directory: ./rdzwx-go
+      run: |
+        echo "=== Preparing iOS platform ==="
+        cordova prepare ios --verbose
+
+    - name: Verify Cordova requirements
+      working-directory: ./rdzwx-go
+      run: |
+        echo "=== Checking Cordova requirements for iOS ==="
+        cordova requirements ios || {
+          echo "Requirements check failed, but attempting build anyway...";
+          echo "This may be due to deployment target or provisioning profile warnings.";
+          exit 0;
+        }
+      continue-on-error: true
+
+    - name: Build iOS for simulator (Debug)
+      working-directory: ./rdzwx-go
+      run: |
+        set +e  # Don't exit on error
+        cordova build ios --debug --emulator --verbose 2>&1 | tee /tmp/cordova-build-output.log
+        BUILD_EXIT_CODE=${PIPESTATUS[0]}
+        echo "Build exit code: $BUILD_EXIT_CODE"
+        exit $BUILD_EXIT_CODE
+
+    - name: Build iOS for device (Release, unsigned)
+      working-directory: ./rdzwx-go
+      run: cordova build ios --release --device --verbose
+      continue-on-error: true
+
+    - name: Capture build logs on failure
+      if: failure()
+      run: |
+        # Output error to workflow summary (publicly viewable)
+        if [ -f /tmp/cordova-build-output.log ]; then
+          echo "## 🔴 iOS Build Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Last 100 lines of build output:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -100 /tmp/cordova-build-output.log >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "Could not read build output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: List build outputs
+      working-directory: ./rdzwx-go
+      run: |
+        echo "=== iOS Build Products ==="
+        find platforms/ios/build -name "*.app" -type d 2>/dev/null || echo "No .app bundles found"
+        echo ""
+        echo "=== Xcode DerivedData ==="
+        find platforms/ios/build -type d -name "*.xcarchive" 2>/dev/null || echo "No archives found"
+
+    - name: Create IPA from app bundle (if build succeeded)
+      working-directory: ./rdzwx-go/platforms/ios/build
+      run: |
+        if [ -d "emulator" ] && [ -n "$(find emulator -name "*.app" -type d 2>/dev/null)" ]; then
+          APP_PATH=$(find emulator -name "*.app" -type d | head -1)
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -r rdzSonde-debug.ipa Payload/
+          rm -rf Payload
+          echo "Created debug IPA"
+        fi
+      continue-on-error: true
+
+    - name: Upload iOS Debug Build
+      uses: actions/upload-artifact@v4
+      with:
+        name: ios-debug-app
+        path: |
+          rdzwx-go/platforms/ios/build/emulator/*.app
+          rdzwx-go/platforms/ios/build/rdzSonde-debug.ipa
+        if-no-files-found: warn
+        retention-days: 30
+
+    - name: Upload iOS Release Build (if exists)
+      uses: actions/upload-artifact@v4
+      if: success() || failure()
+      with:
+        name: ios-release-app
+        path: rdzwx-go/platforms/ios/build/device/*.app
+        if-no-files-found: ignore
+        retention-days: 30
+
+    - name: Run iOS syntax check (xcodebuild)
+      working-directory: ./rdzwx-go/platforms/ios
+      run: |
+        WORKSPACE=$(find . -name "*.xcworkspace" | head -1)
+        if [ -n "$WORKSPACE" ]; then
+          xcodebuild -workspace "$WORKSPACE" -scheme rdzSonde -sdk iphonesimulator -configuration Debug clean analyze
+        fi
+      continue-on-error: true
