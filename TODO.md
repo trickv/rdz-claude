@@ -44,6 +44,16 @@
 - [ ] Review and ensure iOS App Store compliance
 - [ ] Test battery impact and optimize
 
+## Development Tools
+
+- [ ] **Mock TTGO Server**: Create mock server for ad-hoc development and testing
+  - Implement JSON-RDZ protocol TCP server
+  - Support mDNS/Bonjour service broadcasting (`_jsonrdz._tcp`)
+  - Generate realistic sonde data (coordinates, altitude, speed, etc.)
+  - Allow running on laptop without physical TTGO ESP32 hardware
+  - Support configurable update intervals and multiple simulated sondes
+  - Enable testing of stale sonde handling, prediction, and other features
+
 ## Testing & Validation
 
 - [ ] Complete iOS device testing checklist:
