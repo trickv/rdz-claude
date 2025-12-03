@@ -15,6 +15,12 @@
   - Ensure users understand what each icon/button does
   - Consider onboarding flow or help overlay for first-time users
 
+- [ ] **Connection Status Display**: Show connected device ID/call sign
+  - Display which device is currently connected (device ID or call sign)
+  - Show persistent connection indicator in UI
+  - Handle multiple device instances and race conditions
+  - Make it clear which TTGO device the app is talking to
+
 ## iOS Port - Bug Fixes
 
 - [ ] **Fix prediction not working on iOS**
